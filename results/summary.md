@@ -1,0 +1,11 @@
+# Aggregated Results (lower val_loss is better)
+
+Winner: **mamba**
+Margin vs runner-up: **0.014044** val_loss points
+
+| model | runs | d_model | hidden | target_params | params | mean_val_loss | std_val_loss | mean_val_acc | mean_seconds |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| mamba | 5 | 16 | 24 | 2333 | 2333 | 3.044519 | 0.010842 | 0.170492 | 0.205555 |
+| lstm | 5 | 16 | 11 | 2333 | 2268 | 3.058563 | 0.011252 | 0.180328 | 0.264905 |
+| mlp | 5 | 16 | 3 | 2333 | 2279 | 3.060286 | 0.016558 | 0.180328 | 0.020158 |
+| transformer | 5 | 18 | 0 | 2333 | 2341 | 3.067549 | 0.005747 | 0.180328 | 0.107348 |

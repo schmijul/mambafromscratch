@@ -8,20 +8,29 @@ mkdir -p results plots
 
 make
 
-./bin/train \
-  --model all \
-  --data data/tinyshakespeare.txt \
-  --epochs 2 \
-  --steps 300 \
-  --ctx 16 \
-  --dmodel 16 \
-  --hidden 24 \
-  --lr 0.03 \
-  --seed 42 \
-  --benchmark results/benchmark.csv
+OUT_CSV="results/benchmark.csv"
+rm -f "$OUT_CSV"
 
-python3 scripts/plot_results.py results/benchmark.csv plots/val_loss.svg plots/runtime.svg
+SEEDS=(101 202 303 404 505)
+for seed in "${SEEDS[@]}"; do
+  echo "Running seed ${seed}..."
+  ./bin/train \
+    --model all \
+    --data data/tinyshakespeare.txt \
+    --epochs 4 \
+    --steps 700 \
+    --ctx 32 \
+    --dmodel 16 \
+    --hidden 24 \
+    --lr 0.02 \
+    --seed "$seed" \
+    --benchmark "$OUT_CSV"
+done
+
+python3 scripts/summarize_results.py "$OUT_CSV" results/summary.csv results/summary.md
+python3 scripts/plot_results.py "$OUT_CSV" plots/val_loss.svg plots/runtime.svg
 
 echo "Benchmark complete."
-echo "CSV: results/benchmark.csv"
+echo "CSV: $OUT_CSV"
+echo "Summary: results/summary.csv, results/summary.md"
 echo "Plots: plots/val_loss.svg, plots/runtime.svg"

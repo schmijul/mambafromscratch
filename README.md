@@ -1,21 +1,39 @@
-# Mamba From Scratch (CPU, C)
+# Mamba From Scratch: CPU-Only C Benchmark Arena
 
-A local CPU-only benchmark project in plain C that compares four sequence model families under one shared pipeline:
+A from-scratch C project that pits four sequence-model families against each other under one shared local training pipeline:
 
-- `MLP` baseline
-- `LSTM` baseline
-- `Transformer` baseline (single-head causal attention)
-- `Mamba`-like selective state model
+- `MLP`
+- `LSTM`
+- `Transformer` (single-head causal attention)
+- `Mamba`-style selective state model
 
-The focus is educational and reproducible local experimentation, not production optimization.
+Everything runs on CPU, locally, with no external ML framework.
 
-## What Is Implemented
+## Mission
 
-- Dataset loader for char-level next-token prediction (`data/tinyshakespeare.txt` by default)
-- Shared training and validation flow
-- Manual backprop and SGD updates in C for all four models
-- Common metrics: `train_loss`, `val_loss`, `val_acc`, `runtime_seconds`
-- CSV benchmark logging and automatic SVG plot generation
+Build a fair, transparent benchmark where architecture quality is compared under near-equal parameter budgets and identical data/training conditions.
+
+## Why This Repo Is Useful
+
+- Pure C implementation you can read end-to-end.
+- Same dataset task and optimization loop for all models.
+- Automatic parameter matching (`--match-params` enabled by default).
+- Reproducible multi-seed benchmark scripts.
+- Built-in summary + plots for quick interpretation.
+
+## Fairness Rules
+
+This benchmark enforces practical fairness by default:
+
+- Same dataset and split.
+- Same optimizer style (manual SGD updates).
+- Same training schedule per benchmark run.
+- Target-matched parameter count per model family.
+
+The target budget is either:
+
+- `--param-budget <N>` if provided, or
+- inferred from the base Mamba shape (`d_model`, `hidden`) when omitted.
 
 ## Build
 
@@ -29,7 +47,7 @@ make
 ./bin/train --help
 ```
 
-Main options:
+Key options:
 
 - `--model mlp|lstm|transformer|mamba|all`
 - `--data <path>`
@@ -41,52 +59,72 @@ Main options:
 - `--lr <float>`
 - `--seed <int>`
 - `--benchmark <csv_path>`
+- `--param-budget <int>`
+- `--no-match-params`
 
-## Run Benchmark + Plots
+## One-Command Benchmark
 
 ```bash
 scripts/run_benchmark.sh
 ```
 
-This script:
+What it does:
 
-1. builds the binary,
-2. runs all four models,
-3. appends results to `results/benchmark.csv`,
-4. generates `plots/val_loss.svg` and `plots/runtime.svg`.
+1. Builds the project.
+2. Runs all four models for 5 seeds (`101, 202, 303, 404, 505`).
+3. Uses parameter matching with target `2333` trainable parameters.
+4. Writes per-run logs to `results/benchmark.csv`.
+5. Writes aggregated ranking to `results/summary.csv` and `results/summary.md`.
+6. Generates mean-performance plots in `plots/`.
 
-## Latest Benchmark Snapshot
+## Latest Multi-Seed Result (Equal-Param Setup)
 
-Configuration used for the latest rows:
+Benchmark configuration:
 
 - dataset: `data/tinyshakespeare.txt`
-- epochs: `2`
-- steps per epoch: `300`
-- context length: `16`
-- d_model: `16`
-- hidden/state: `24`
-- learning rate: `0.03`
-- seed: `42`
+- epochs: `4`
+- steps per epoch: `700`
+- context length: `32`
+- base shape: `d_model=16`, `hidden=24`
+- learning rate: `0.02`
+- seeds: `5`
+- parameter matching: `enabled`
+- target parameters: `2333`
 
-| model | train_loss | val_loss | val_acc | seconds |
-|---|---:|---:|---:|---:|
-| mlp | 3.316273 | 3.078325 | 0.180328 | 0.026497 |
-| lstm | 3.373384 | 3.172548 | 0.180328 | 0.147415 |
-| transformer | 3.380722 | 3.195895 | 0.180328 | 0.012174 |
-| mamba | 3.361045 | 3.105917 | 0.131148 | 0.037992 |
+**Winner: `mamba`**
+
+- Mean validation-loss margin vs runner-up (`lstm`): **`0.014044`**
+- Relative to runner-up: about **`0.46%`** lower val-loss
+
+| model | runs | d_model | hidden | target_params | params | mean_val_loss | std_val_loss | mean_val_acc | mean_seconds |
+|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|
+| mamba | 5 | 16 | 24 | 2333 | 2333 | 3.044519 | 0.010842 | 0.170492 | 0.205555 |
+| lstm | 5 | 16 | 11 | 2333 | 2268 | 3.058563 | 0.011252 | 0.180328 | 0.264905 |
+| mlp | 5 | 16 | 3 | 2333 | 2279 | 3.060286 | 0.016558 | 0.180328 | 0.020158 |
+| transformer | 5 | 18 | 0 | 2333 | 2341 | 3.067549 | 0.005747 | 0.180328 | 0.107348 |
 
 ## Plots
 
-### Validation Loss
+### Mean Validation Loss (lower is better)
 
-![Validation loss](plots/val_loss.svg)
+![Mean validation loss](plots/val_loss.svg)
 
-### Runtime (seconds)
+### Mean Runtime (seconds, lower is faster)
 
-![Runtime](plots/runtime.svg)
+![Mean runtime](plots/runtime.svg)
 
-## Notes and Limitations
+## File Map
 
-- The `Transformer` and `Mamba` implementations are intentionally compact v1 baselines.
-- This repository prioritizes readability and local CPU comparability over scale/performance.
-- For stronger conclusions, run longer schedules and multiple seeds, then compare aggregate statistics.
+- Training engine and models: `src/main.c`
+- Dataset sample: `data/tinyshakespeare.txt`
+- Benchmark runner: `scripts/run_benchmark.sh`
+- Summary generator: `scripts/summarize_results.py`
+- Plot generator: `scripts/plot_results.py`
+- Raw benchmark rows: `results/benchmark.csv`
+- Aggregated ranking: `results/summary.csv`
+
+## Notes
+
+- This is a compact research-style baseline, not a production-optimized implementation.
+- The current Mamba implementation is intentionally minimal but already competitive in this setup.
+- If you increase sequence length and rerun multi-seed sweeps, the ranking can shift; always compare by aggregated metrics, not one seed.

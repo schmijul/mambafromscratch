@@ -2,24 +2,36 @@
 import csv
 import os
 import sys
+from collections import defaultdict
 
 
-def latest_rows_by_model(path):
-    latest = {}
+def aggregate(path):
+    grouped = defaultdict(list)
     with open(path, newline="", encoding="utf-8") as f:
-        reader = csv.DictReader(f)
-        for row in reader:
-            latest[row["model"]] = row
-    return latest
+        for row in csv.DictReader(f):
+            grouped[row["model"]].append(row)
+
+    ordered = ["mlp", "lstm", "transformer", "mamba"]
+    labels = []
+    val_losses = []
+    runtimes = []
+    for model in ordered:
+        rows = grouped.get(model, [])
+        if not rows:
+            continue
+        labels.append(model)
+        val_losses.append(sum(float(r["val_loss"]) for r in rows) / len(rows))
+        runtimes.append(sum(float(r["seconds"]) for r in rows) / len(rows))
+    return labels, val_losses, runtimes
 
 
 def draw_bar_svg(path, title, ylabel, labels, values, color):
-    width = 860
-    height = 420
-    margin_left = 80
+    width = 920
+    height = 440
+    margin_left = 84
     margin_right = 30
     margin_top = 60
-    margin_bottom = 90
+    margin_bottom = 92
     chart_w = width - margin_left - margin_right
     chart_h = height - margin_top - margin_bottom
 
@@ -70,18 +82,13 @@ def main():
         sys.exit(1)
 
     csv_path, val_plot, runtime_plot = sys.argv[1], sys.argv[2], sys.argv[3]
-    rows = latest_rows_by_model(csv_path)
-
-    ordered = ["mlp", "lstm", "transformer", "mamba"]
-    labels = [m for m in ordered if m in rows]
-    val_losses = [float(rows[m]["val_loss"]) for m in labels]
-    runtimes = [float(rows[m]["seconds"]) for m in labels]
+    labels, val_losses, runtimes = aggregate(csv_path)
 
     os.makedirs(os.path.dirname(val_plot), exist_ok=True)
     os.makedirs(os.path.dirname(runtime_plot), exist_ok=True)
 
-    draw_bar_svg(val_plot, "Validation Loss by Model", "val_loss", labels, val_losses, "#2563eb")
-    draw_bar_svg(runtime_plot, "Runtime by Model (seconds)", "seconds", labels, runtimes, "#059669")
+    draw_bar_svg(val_plot, "Mean Validation Loss by Model", "mean val_loss", labels, val_losses, "#2563eb")
+    draw_bar_svg(runtime_plot, "Mean Runtime by Model (seconds)", "mean seconds", labels, runtimes, "#059669")
 
 
 if __name__ == "__main__":
