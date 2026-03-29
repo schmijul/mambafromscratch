@@ -1,0 +1,8 @@
+/bin/
+/build/
+*.o
+*.out
+*.png
+*.pdf
+*.pyc
+__pycache__/
