@@ -36,14 +36,26 @@ typedef struct {
     float lr;
     uint32_t seed;
     const char *benchmark_path;
+    int param_budget;
+    bool match_params;
 } Config;
 
 typedef struct {
+    long long params;
+    int used_d_model;
+    int used_hidden;
+    long long target_params;
     float train_loss;
     float val_loss;
     float val_acc;
     double seconds;
 } RunResult;
+
+typedef struct {
+    int d_model;
+    int hidden;
+    long long params;
+} ModelShape;
 
 typedef struct {
     uint32_t state;
@@ -228,6 +240,8 @@ static Config default_config(void) {
     c.lr = 0.03f;
     c.seed = 42;
     c.benchmark_path = "results/benchmark.csv";
+    c.param_budget = 0;
+    c.match_params = true;
     return c;
 }
 
@@ -245,6 +259,8 @@ static void print_help(void) {
     puts("  --lr F                 learning rate (default 0.03)");
     puts("  --seed N               RNG seed (default 42)");
     puts("  --benchmark PATH       output CSV path (default results/benchmark.csv)");
+    puts("  --param-budget N       force target trainable params for every model");
+    puts("  --no-match-params      disable automatic parameter matching");
     puts("  --help                 show this message");
 }
 
@@ -274,6 +290,10 @@ static Config parse_args(int argc, char **argv) {
             c.seed = (uint32_t)atoi(argv[++i]);
         } else if (strcmp(argv[i], "--benchmark") == 0 && i + 1 < argc) {
             c.benchmark_path = argv[++i];
+        } else if (strcmp(argv[i], "--param-budget") == 0 && i + 1 < argc) {
+            c.param_budget = atoi(argv[++i]);
+        } else if (strcmp(argv[i], "--no-match-params") == 0) {
+            c.match_params = false;
         } else {
             fprintf(stderr, "unknown arg: %s\n", argv[i]);
             print_help();
@@ -281,11 +301,94 @@ static Config parse_args(int argc, char **argv) {
         }
     }
 
-    if (c.epochs < 1 || c.steps_per_epoch < 1 || c.context_len < 2 || c.d_model < 2 || c.hidden < 2 || c.lr <= 0.0f) {
+    if (c.epochs < 1 || c.steps_per_epoch < 1 || c.context_len < 2 || c.d_model < 2 || c.hidden < 2 || c.lr <= 0.0f || c.param_budget < 0) {
         fatal("invalid hyperparameters");
     }
 
     return c;
+}
+
+static long long llabs_diff(long long a, long long b) {
+    return (a > b) ? (a - b) : (b - a);
+}
+
+static long long params_mlp(int vocab, int ctx, int d, int h) {
+    return (long long)vocab * d + (long long)ctx * d * h + h + (long long)h * vocab + vocab;
+}
+
+static long long params_lstm(int vocab, int d, int h) {
+    return (long long)vocab * d + 4LL * h * (h + d) + 4LL * h + (long long)h * vocab + vocab;
+}
+
+static long long params_transformer(int vocab, int d) {
+    return (long long)vocab * d + 3LL * d * d + (long long)d * vocab + vocab;
+}
+
+static long long params_mamba(int vocab, int d, int h) {
+    return (long long)vocab * d + 2LL * d * h + 2LL * h + (long long)h * vocab + vocab;
+}
+
+static int solve_best_h(ModelType model, int vocab, int ctx, int d, long long target) {
+    int best_h = 2;
+    long long best_delta = (1LL << 62);
+    for (int h = 2; h <= 2048; ++h) {
+        long long p = 0;
+        if (model == MODEL_MLP) p = params_mlp(vocab, ctx, d, h);
+        if (model == MODEL_LSTM) p = params_lstm(vocab, d, h);
+        if (model == MODEL_MAMBA) p = params_mamba(vocab, d, h);
+        long long delta = llabs_diff(p, target);
+        if (delta < best_delta) {
+            best_delta = delta;
+            best_h = h;
+        }
+    }
+    return best_h;
+}
+
+static int solve_best_d_for_transformer(int vocab, long long target) {
+    int best_d = 2;
+    long long best_delta = (1LL << 62);
+    for (int d = 2; d <= 1024; ++d) {
+        long long p = params_transformer(vocab, d);
+        long long delta = llabs_diff(p, target);
+        if (delta < best_delta) {
+            best_delta = delta;
+            best_d = d;
+        }
+    }
+    return best_d;
+}
+
+static ModelShape build_shape(const Config *cfg, const Dataset *ds, ModelType model, long long target) {
+    ModelShape s;
+    s.d_model = cfg->d_model;
+    s.hidden = cfg->hidden;
+    s.params = 0;
+
+    int vocab = ds->vocab_size;
+    int ctx = cfg->context_len;
+
+    if (!cfg->match_params) {
+        if (model == MODEL_TRANSFORMER) s.hidden = 0;
+        if (model == MODEL_MLP) s.params = params_mlp(vocab, ctx, s.d_model, s.hidden);
+        if (model == MODEL_LSTM) s.params = params_lstm(vocab, s.d_model, s.hidden);
+        if (model == MODEL_TRANSFORMER) s.params = params_transformer(vocab, s.d_model);
+        if (model == MODEL_MAMBA) s.params = params_mamba(vocab, s.d_model, s.hidden);
+        return s;
+    }
+
+    if (model == MODEL_TRANSFORMER) {
+        s.d_model = solve_best_d_for_transformer(vocab, target);
+        s.hidden = 0;
+        s.params = params_transformer(vocab, s.d_model);
+    } else {
+        s.hidden = solve_best_h(model, vocab, ctx, s.d_model, target);
+        if (model == MODEL_MLP) s.params = params_mlp(vocab, ctx, s.d_model, s.hidden);
+        if (model == MODEL_LSTM) s.params = params_lstm(vocab, s.d_model, s.hidden);
+        if (model == MODEL_MAMBA) s.params = params_mamba(vocab, s.d_model, s.hidden);
+    }
+
+    return s;
 }
 
 typedef struct {
@@ -978,16 +1081,16 @@ static void ensure_csv_header(const char *path) {
     }
     f = fopen(path, "w");
     if (!f) fatal("could not create benchmark csv");
-    fprintf(f, "model,epochs,steps,ctx,d_model,hidden,lr,seed,train_loss,val_loss,val_acc,seconds\n");
+    fprintf(f, "model,epochs,steps,ctx,d_model,hidden,target_params,params,lr,seed,train_loss,val_loss,val_acc,seconds\n");
     fclose(f);
 }
 
 static void append_result_csv(const char *path, const Config *cfg, const char *model, const RunResult *r) {
     FILE *f = fopen(path, "a");
     if (!f) fatal("could not append benchmark csv");
-    fprintf(f, "%s,%d,%d,%d,%d,%d,%.6f,%u,%.6f,%.6f,%.6f,%.6f\n",
-            model, cfg->epochs, cfg->steps_per_epoch, cfg->context_len, cfg->d_model, cfg->hidden,
-            cfg->lr, cfg->seed, r->train_loss, r->val_loss, r->val_acc, r->seconds);
+    fprintf(f, "%s,%d,%d,%d,%d,%d,%lld,%lld,%.6f,%u,%.6f,%.6f,%.6f,%.6f\n",
+            model, cfg->epochs, cfg->steps_per_epoch, cfg->context_len, r->used_d_model, r->used_hidden,
+            r->target_params, r->params, cfg->lr, cfg->seed, r->train_loss, r->val_loss, r->val_acc, r->seconds);
     fclose(f);
 }
 
@@ -1042,7 +1145,7 @@ static void eval_model(ModelType model, void *model_ptr, const Dataset *ds, int 
     free(ctx);
 }
 
-static RunResult train_one(const Config *cfg, const Dataset *ds, ModelType model) {
+static RunResult train_one(const Config *cfg, const Dataset *ds, ModelType model, const ModelShape *shape, long long target_params) {
     if (ds->length < cfg->context_len + 2) {
         fatal("dataset too small for context length");
     }
@@ -1060,6 +1163,12 @@ static RunResult train_one(const Config *cfg, const Dataset *ds, ModelType model
     printf("\n=== Training %s ===\n", model_name(model));
     printf("dataset: %d chars, vocab: %d, train split: %d, val split: %d\n",
            ds->length, ds->vocab_size, split, ds->length - split);
+    if (model == MODEL_TRANSFORMER) {
+        printf("shape: d_model=%d params=%lld target=%lld\n", shape->d_model, shape->params, target_params);
+    } else {
+        printf("shape: d_model=%d hidden=%d params=%lld target=%lld\n",
+               shape->d_model, shape->hidden, shape->params, target_params);
+    }
 
     double t0 = now_seconds();
     double train_loss_sum = 0.0;
@@ -1074,10 +1183,10 @@ static RunResult train_one(const Config *cfg, const Dataset *ds, ModelType model
     memset(&tr, 0, sizeof(tr));
     memset(&ma, 0, sizeof(ma));
 
-    if (model == MODEL_MLP) mlp_init(&mlp, ds->vocab_size, cfg->context_len, cfg->d_model, cfg->hidden, &rng);
-    if (model == MODEL_LSTM) lstm_init(&lstm, ds->vocab_size, cfg->context_len, cfg->d_model, cfg->hidden, &rng);
-    if (model == MODEL_TRANSFORMER) transformer_init(&tr, ds->vocab_size, cfg->context_len, cfg->d_model, &rng);
-    if (model == MODEL_MAMBA) mamba_init(&ma, ds->vocab_size, cfg->context_len, cfg->d_model, cfg->hidden, &rng);
+    if (model == MODEL_MLP) mlp_init(&mlp, ds->vocab_size, cfg->context_len, shape->d_model, shape->hidden, &rng);
+    if (model == MODEL_LSTM) lstm_init(&lstm, ds->vocab_size, cfg->context_len, shape->d_model, shape->hidden, &rng);
+    if (model == MODEL_TRANSFORMER) transformer_init(&tr, ds->vocab_size, cfg->context_len, shape->d_model, &rng);
+    if (model == MODEL_MAMBA) mamba_init(&ma, ds->vocab_size, cfg->context_len, shape->d_model, shape->hidden, &rng);
 
     for (int epoch = 0; epoch < cfg->epochs; ++epoch) {
         double epoch_loss = 0.0;
@@ -1134,6 +1243,10 @@ static RunResult train_one(const Config *cfg, const Dataset *ds, ModelType model
     double t1 = now_seconds();
 
     RunResult rr;
+    rr.params = shape->params;
+    rr.used_d_model = shape->d_model;
+    rr.used_hidden = shape->hidden;
+    rr.target_params = target_params;
     rr.train_loss = (train_count > 0) ? (float)(train_loss_sum / (double)train_count) : 0.0f;
     rr.val_loss = val_loss;
     rr.val_acc = val_acc;
@@ -1164,14 +1277,24 @@ int main(int argc, char **argv) {
     ensure_dir_results();
     ensure_csv_header(cfg.benchmark_path);
 
+    long long target_params = 0;
+    if (cfg.param_budget > 0) {
+        target_params = cfg.param_budget;
+    } else {
+        target_params = params_mamba(ds.vocab_size, cfg.d_model, cfg.hidden);
+    }
+    printf("parameter policy: %s, target=%lld\n", cfg.match_params ? "matched" : "raw", target_params);
+
     if (cfg.model == MODEL_ALL) {
         ModelType models[4] = {MODEL_MLP, MODEL_LSTM, MODEL_TRANSFORMER, MODEL_MAMBA};
         for (int i = 0; i < 4; ++i) {
-            RunResult rr = train_one(&cfg, &ds, models[i]);
+            ModelShape shape = build_shape(&cfg, &ds, models[i], target_params);
+            RunResult rr = train_one(&cfg, &ds, models[i], &shape, target_params);
             append_result_csv(cfg.benchmark_path, &cfg, model_name(models[i]), &rr);
         }
     } else {
-        RunResult rr = train_one(&cfg, &ds, cfg.model);
+        ModelShape shape = build_shape(&cfg, &ds, cfg.model, target_params);
+        RunResult rr = train_one(&cfg, &ds, cfg.model, &shape, target_params);
         append_result_csv(cfg.benchmark_path, &cfg, model_name(cfg.model), &rr);
     }
 
